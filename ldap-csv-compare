@@ -1,5 +1,8 @@
 #!/usr/bin/perl
 
+# Add localStudentGradYr:
+#   $ /usr/bin/ldapsearch -LLL -x -D cn=Manager,o=Local -wsecret -b ou=Students,ou=People,o=Local '(&(objectClass=local)(&(objectClass=person)(!(localStudentGradYr=*))))' dn | cut -d ' ' -f 2- | perl -pi -e 'my ($yr) = /ou=(\d{4})/; $_ = "dn: ${_}add: localStudentGradYr\nlocalStudentGradYr: $yr\n" if /\S/' | ldapmodify -x -D cn=Manager,o=Local -wsecret
+
 use strict;
 use warnings;
 no warnings 'uninitialized';
