@@ -1,0 +1,121 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+no warnings 'uninitialized';
+
+use Net::LDAP;
+use Net::LDAP::Entry;
+use Net::LDAP::LDIF;
+use Net::LDAP::Util qw/ldap_explode_dn escape_filter_value/;
+use Crypt::SmbHash qw(lmhash nthash);
+use Getopt::Long qw(:config no_ignore_case);
+use List::MoreUtils qw(firstidx);
+use Data::Dumper;
+
+my ($host, $binddn, $bindpw, $basedn, $header);
+GetOptions(
+  'host|h=s' => \$host,
+  'binddn|D=s' => \$binddn,
+  'bindpw|w=s' => \$bindpw,
+  'basedn|b=s' => \$basedn,
+  'header|H' => \$header,
+);
+die "Usage: $0 -h host -D binddn -w secret -b basedn [--header] columns in order\n" unless $host && $binddn && $bindpw && $basedn && $#ARGV;
+
+my $ldap = Net::LDAP->new($host);
+defined $ldap or die "Cannot start $0: $!\n";
+$ldap->bind($binddn, password=>$bindpw);
+my $search = $ldap->search(
+  base => $basedn,
+  scope => 'base',
+  attrs => ['dn'],
+  filter => 'o=*',
+);
+$search->code && die "Cannot find base: ".$search->error."\n";
+$_=<STDIN> if $header;
+while ( <STDIN> ) {
+  chomp;
+  @_ = split /\t/;
+  my %stdin = (
+    sn => $_[firstidx { $_ eq 'sn' } @ARGV],
+    givenName => $_[firstidx { $_ eq 'givenName' } @ARGV],
+    localStudentGradYr => $_[firstidx { $_ eq 'localStudentGradYr' } @ARGV],
+    uid => $_[firstidx { $_ eq 'uid' } @ARGV],
+    userPassword => $_[firstidx { $_ eq 'userPassword' } @ARGV],
+    mail => $_[firstidx { $_ eq 'mail' } @ARGV],
+    localPersonID => $_[firstidx { $_ eq 'localPersonID' } @ARGV],
+  );
+  my $search = $ldap->search(
+    base => $basedn,
+    scope => 'sub',
+    attrs => [qw(dn sn givenName localStudentGradYr uid uidNumber sambaSID accountStatus loginShell description homeDirectory userPassword sambaLMPassword sambaNTPassword mail localPersonID)],
+    filter => "(&(objectClass=person)(uid=$stdin{uid}))",
+  );
+  $search->code && die "Cannot find $stdin{uid}: ".$search->error."\n";
+  warn "$stdin{uid}: ", $search->count, "\n" if $search->count != 1;
+  if ( my $entry = $search->entry(0) ) {
+    if ( $stdin{localStudentGradYr} ) {
+      if ( $entry->dn !~ /ou=$stdin{localStudentGradYr},ou=Students/i ) {
+        warn "$stdin{uid} LDAP(".$entry->dn.") ne STDIN($stdin{localStudentGradYr})\n";
+      }
+      if ( lc($entry->get_value('localPersonID')) ne lc($stdin{localPersonID}) ) {
+        warn "$stdin{uid} LDAP(".$entry->get_value('localPersonID').") ne STDIN($stdin{localPersonID})\n";
+        $ldap->modify($entry->dn, replace => {localPersonID => $stdin{localPersonID}});
+      }
+      if ( $entry->get_value('homeDirectory') !~ m!/students/$stdin{localStudentGradYr}/$stdin{uid}$!i ) {
+        warn "$stdin{uid} LDAP(".$entry->get_value('homeDirectory').") ne STDIN($stdin{localStudentGradYr})\n" 
+      }
+      if ( $entry->dn !~ m!^uid=$stdin{uid},ou=$stdin{localStudentGradYr},ou=Students,ou=People!i ) {
+        warn "$stdin{uid} LDAP(".$entry->dn.") ne STDIN($stdin{uid},$stdin{localStudentGradYr})\n";
+      }
+      if ( $entry->get_value('description') !~ m/Students?/ ) {
+        warn "$stdin{uid} LDAP(".$entry->get_value('description').") ne 'Student'\n";
+      }
+    } else {
+      if ( $entry->get_value('homeDirectory') !~ m!/staff/$stdin{uid}$!i ) {
+        warn "$stdin{uid} LDAP(".$entry->get_value('homeDirectory').") ne STDIN($stdin{uid})\n";
+      }
+      if ( $entry->dn !~ m!^uid=$stdin{uid},ou=Staff,ou=People!i ) {
+        warn "$stdin{uid} LDAP(".$entry->dn.") ne STDIN($stdin{uid})\n";
+      }
+      if ( $entry->get_value('description') ne 'Staff' ) {
+        warn "$stdin{uid} LDAP(".$entry->get_value('description').") ne 'Staff'\n";
+      }
+    }
+    if ( lc($entry->get_value('sn')) ne lc($stdin{sn}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('sn').") ne STDIN($stdin{sn})\n";
+    }
+    if ( lc($entry->get_value('givenName')) ne lc($stdin{givenName}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('givenName').") ne STDIN($stdin{givenName})\n";
+    }
+    if ( lc($entry->get_value('uid')) ne lc($stdin{uid}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('uid').") ne STDIN($stdin{uid})\n";
+    }
+    if ( lc($entry->get_value('userPassword')) ne lc($stdin{userPassword}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('userPassword').") ne STDIN($stdin{userPassword})\n";
+    }
+    if ( lc($entry->get_value('mail')) ne lc($stdin{mail}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('mail').") ne STDIN($stdin{mail})\n";
+      $ldap->modify($entry->dn, replace => {mail => $stdin{mail}});
+    }
+    if ( $entry->get_value('sambaLMPassword') ne lmhash($stdin{userPassword}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('sambaLMPassword').") ne STDIN($stdin{userPassword})\n";
+    }
+    if ( $entry->get_value('sambaNTPassword') ne nthash($stdin{userPassword}) ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('sambaNTPassword').") ne STDIN($stdin{userPassword})\n";
+    }
+    if ( $entry->get_value('loginShell') ne '/bin/false' ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('loginShell').") ne '/bin/false'\n";
+    }
+    if ( $entry->get_value('accountStatus') ne 'active' ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('accountStatus').") ne 'active'\n";
+    }
+    my $sid = $entry->get_value('uidNumber') * 2 + 1000;
+    if ( $entry->get_value('sambaSID') !~ m/-$sid$/ ) {
+      warn "$stdin{uid} LDAP(".$entry->get_value('uidNumber').") ne LDAP('sambaSID')\n";
+    }
+
+    #last;
+  }
+}
